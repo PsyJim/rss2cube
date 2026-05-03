@@ -1,1 +1,4 @@
 .vscode
+build/
+dist/
+rss2cube.egg-info/
