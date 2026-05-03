@@ -1,0 +1,1 @@
+PLATESCALE = 1.2120  # arcsec / mm MEGARA PLATESCALE
