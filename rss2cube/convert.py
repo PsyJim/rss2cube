@@ -1,9 +1,24 @@
+import multiprocessing as mp
 import numpy
-import scipy.ndimage  ### OPTIMIZACIÓN: Importado para acelerar la convolución
 from astropy.io import fits
+from astropy.convolution import Gaussian2DKernel, convolve
 import megaradrp.datamodel as dm
+from tqdm import tqdm
 from .getspaxdim import getspaxdim
-import constants as cte
+from . import constants as cte
+
+
+# ====================================================================
+# FUNCIÓN TRABAJADORA PARA MULTIPROCESSING (Debe ir a nivel de módulo)
+# ====================================================================
+def worker_convolucion(args):
+    """
+    Función trabajadora para multiprocessing.
+    Recibe una tupla con (canal_2d, kernel) y devuelve el canal convolucionado.
+    """
+    canal_2d, kernel = args
+    return convolve(canal_2d, kernel, boundary="extend", normalize_kernel=True)
+
 
 def convert(
     infile,
@@ -18,9 +33,7 @@ def convert(
     Convert a MEGARA fits RSS file format
     to a traditional IFU fits data cube (3-d data array)
 
-
     infile: string with the rss fits filename
-
 
     arcsec_per_pixel: float, desired arcsec per pixel. It will find the closest arcsec_per_pixel of your input, but not exact
     sigma_conv: float. By default is 1 arcsec. This parameter is the sigma in arcsecs of the gaussian convolution used to populate the square-pixels around
@@ -153,15 +166,40 @@ def convert(
             else:
                 end_sp = Nwspec
 
-    print("\n1st step: Convolución espacial 3D...")
+    # ==========================================================
+    # 1st step: Convolución espacial 3D con Multiprocessing y TQDM
+    # ==========================================================
+    print("\n1st step: Convolución espacial 3D (Astropy + Multiprocessing)...")
     sigma_conv_pix = sigma_conv / ((dx * nbin) / expansion_factor)
+    kernel = Gaussian2DKernel(x_stddev=sigma_conv_pix)
 
-    ### OPTIMIZACIÓN 2: Convolución vectorizada con Scipy
-    # Aplicamos el filtro gaussiano solo en los ejes espaciales (ejes 1 y 2), ignorando el eje espectral (eje 0)
-    cube.data = scipy.ndimage.gaussian_filter(
-        cube.data, sigma=[0, sigma_conv_pix, sigma_conv_pix], mode="nearest"
-    )
+    num_cores = mp.cpu_count()
+    print(f"-> Detectados {num_cores} núcleos. Distribuyendo carga de trabajo...")
 
+    # Empaquetamos cada capa del cubo junto con el kernel
+    tareas = [(cube.data[i], kernel) for i in range(Nw)]
+
+    # Procesamiento en paralelo CON BARRA DE PROGRESO
+    with mp.Pool(processes=num_cores) as pool:
+        # pool.imap va entregando resultados conforme terminan, y tqdm dibuja la barra
+        resultados = list(
+            tqdm(
+                pool.imap(worker_convolucion, tareas),
+                total=len(tareas),
+                desc="Convolucionando canales",
+                unit=" canal",
+            )
+        )
+
+    # Reensamblamos el cubo con las capas convolucionadas
+    for i in range(Nw):
+        cube.data[i] = resultados[i]
+
+    print("-> Convolución terminada.")
+
+    # ==========================================================
+    # 2nd step: Rebinning vectorizado espacial
+    # ==========================================================
     cube_rebin = fits.PrimaryHDU()
     cube_rebin.header = rss[0].header
     cube_rebin.header.remove("CRPIX1", ignore_missing=True)
@@ -209,7 +247,7 @@ def convert(
         cube_rebin.header.update(BUNIT="erg/s/cm**2/Angstrom")
 
     ### OPTIMIZACIÓN 3: Rebinning espacial vectorizado de todo el cubo
-    print("2nd step: Rebinning vectorizado espacial...")
+    print("\n2nd step: Rebinning vectorizado espacial...")
     # Nos aseguramos de recortar el arreglo original para que sea un múltiplo exacto de nbin
     Ny_trunc = (Ny // nbin) * nbin
     Nx_trunc = (Nx // nbin) * nbin

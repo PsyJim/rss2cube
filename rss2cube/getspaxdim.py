@@ -1,5 +1,5 @@
 import numpy as np
-import constants as cte
+from . import constants as cte
 
 def getspaxdim(data, phdr, sky_bundles, expansion_factor=5):
     """
